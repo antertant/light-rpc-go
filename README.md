@@ -1,2 +1,2 @@
 # light-rpc-go
-A light RPC framwork of GoLang.
+A light RPC framework of GoLang.
