@@ -39,15 +39,15 @@ func (c *JsonCodec) Write(header *Header, body interface{}) (err error) {
 	defer func() {
 		_ = c.bufferedWritter.Flush()
 		if err != nil {
-			_ = c.Close
+			_ = c.Close()
 		}
 	}()
 	if err := c.encoder.Encode(header); err != nil {
-		log.Println("[RPC Codec Encoding error] cannot encode header under gob:", err)
+		log.Println("[RPC Codec] cannot encode header under json:", err)
 		return err
 	}
 	if err := c.encoder.Encode(body); err != nil {
-		log.Println("[RPC Codec Encoding error] cannot encode body under gob:", err)
+		log.Println("[RPC Codec] cannot encode body under json:", err)
 		return err
 	}
 	return nil

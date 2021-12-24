@@ -1,3 +1,3 @@
-module light-rpc-go
+module lrpc
 
 go 1.17
