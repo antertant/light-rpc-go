@@ -3,6 +3,7 @@ package lrpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"lrpc/codec"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 //
@@ -20,13 +22,17 @@ const ServeToken = 0x145ac5
 // Fixed part in HTTP header to represent key information of rpc request,
 // always encoded in json format
 type Option struct {
-	ServeToken int // rpc request is makred with corresponding ServeToken
-	CodecType  codec.Type
+	ServeToken     int // rpc request is makred with corresponding ServeToken
+	CodecType      codec.Type
+	ConnectTimeout time.Duration
+	HandleTimeout  time.Duration
 }
 
 var DefaultOption = &Option{
-	ServeToken: ServeToken,
-	CodecType:  codec.GobType,
+	ServeToken:     ServeToken,
+	CodecType:      codec.GobType,
+	ConnectTimeout: time.Second * 10,
+	HandleTimeout:  0, // 0 means no limit
 }
 
 //
@@ -110,21 +116,21 @@ func (server *Server) ServeConnect(connect io.ReadWriteCloser) {
 		return
 	}
 	if option.ServeToken != ServeToken {
-		log.Println("[RPC Server] invalid serve token %x", option.ServeToken)
+		log.Printf("[RPC Server] invalid serve token %x\n", option.ServeToken)
 		return
 	}
 	newCodec := codec.NewCodecFuncMap[option.CodecType]
 	if newCodec == nil {
-		log.Println("[RPC Server] invald codec type %s", option.CodecType)
+		log.Printf("[RPC Server] invald codec type %s\n", option.CodecType)
 		return
 	}
-	server.serveCodec(newCodec(connect))
+	server.serveCodec(newCodec(connect), &option)
 }
 
 // placeholder for response argv when error occurs
 var invalidRequest = struct{}{}
 
-func (server *Server) serveCodec(cc codec.Codec) {
+func (server *Server) serveCodec(cc codec.Codec, opt *Option) {
 	// the action of response clients needs to be atom to avoid transmition mistakes
 	sending := new(sync.Mutex)
 
@@ -141,7 +147,7 @@ func (server *Server) serveCodec(cc codec.Codec) {
 			continue
 		}
 		waitGroup.Add(1)
-		go server.handleRequest(cc, req, sending, waitGroup)
+		go server.handleRequest(cc, req, sending, waitGroup, opt.HandleTimeout)
 	}
 	waitGroup.Wait()
 	_ = cc.Close()
@@ -191,13 +197,34 @@ func (server *Server) sendResponse(cc codec.Codec, header *codec.Header, body in
 	}
 }
 
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, waitGroup *sync.WaitGroup) {
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, waitGroup *sync.WaitGroup, timeout time.Duration) {
 	defer waitGroup.Done()
-	err := req.svc.call(req.mtype, req.argv, req.replyv)
-	if err != nil {
-		req.header.Error = err.Error()
-		server.sendResponse(cc, req.header, invalidRequest, sending)
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		called <- struct{}{}
+
+		if err != nil {
+			req.header.Error = err.Error()
+			server.sendResponse(cc, req.header, invalidRequest, sending)
+			sent <- struct{}{}
+			return
+		}
+		server.sendResponse(cc, req.header, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+
+	if timeout == 0 {
+		<-called
+		<-sent
 		return
 	}
-	server.sendResponse(cc, req.header, req.replyv.Interface(), sending)
+	select {
+	case <-time.After(timeout):
+		req.header.Error = fmt.Sprintf("[RPC Server] request handle timeout: expect completion within %s", timeout)
+		server.sendResponse(cc, req.header, invalidRequest, sending)
+	case <-sent:
+		<-called
+	}
 }
