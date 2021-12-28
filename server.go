@@ -8,6 +8,7 @@ import (
 	"log"
 	"lrpc/codec"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ var DefaultOption = &Option{
 }
 
 //
-// Server Struct
+// Server Struct and Variables
 //
 type Server struct {
 	serviceMap sync.Map
@@ -54,6 +55,12 @@ func NewServer() *Server {
 }
 
 var DefaultServer = NewServer()
+
+const (
+	connected        = "200 Connected to LRPC"
+	defaultRPCPath   = "/_lrpc_"
+	defaultDebugPath = "/debug/lrpc"
+)
 
 //
 // Server Methods
@@ -224,7 +231,39 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 	case <-time.After(timeout):
 		req.header.Error = fmt.Sprintf("[RPC Server] request handle timeout: expect completion within %s", timeout)
 		server.sendResponse(cc, req.header, invalidRequest, sending)
-	case <-sent:
-		<-called
+	case <-called:
+		<-sent
 	}
+}
+
+//
+// Server HTTP Support
+//
+
+// implemented http.Handler answering RPC requests
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("RPC hijacking", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConnect(conn)
+}
+
+// register an HTTP handler for RPC messages on defaultRPCPath
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("RPC server debug addr: ", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
